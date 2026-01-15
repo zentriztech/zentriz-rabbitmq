@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: read
       id-token: write
 
     steps:
@@ -30,12 +30,17 @@ jobs:
 
       - name: Configure pnpm for GitHub Packages
         run: |
-          echo "🔧 Configurando pnpm para GitHub Packages..."
-          pnpm config set @zentriztech:registry https://npm.pkg.github.com
-          pnpm config set //npm.pkg.github.com/:_authToken ${{ secrets.DEPLOY_TOKEN }}
-          echo "✅ Configuração do pnpm concluída"
+          echo "🔧 Configurando .npmrc para GitHub Packages..."
+          # Usar GITHUB_TOKEN se disponível, senão usar DEPLOY_TOKEN
+          TOKEN="${{ secrets.DEPLOY_TOKEN || github.token }}"
+          echo "@zentriztech:registry=https://npm.pkg.github.com" >> .npmrc
+          echo "//npm.pkg.github.com/:_authToken=${TOKEN}" >> .npmrc
+          echo "✅ Arquivo .npmrc criado"
+          echo "📋 Conteúdo do .npmrc (token oculto):"
+          sed 's/:_authToken=.*/:_authToken=***/' .npmrc
         env:
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: Get package version
         id: package-version
@@ -70,10 +75,13 @@ jobs:
         if: steps.should-publish.outputs.should-publish == 'true'
         run: |
           echo "📦 Instalando dependências..."
+          # Garantir que o token está disponível
+          TOKEN="${{ secrets.DEPLOY_TOKEN || github.token }}"
+          export NODE_AUTH_TOKEN="${TOKEN}"
           pnpm install --no-frozen-lockfile
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
-          PNPM_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.DEPLOY_TOKEN || github.token }}
+          PNPM_TOKEN: ${{ secrets.DEPLOY_TOKEN || github.token }}
 
       - name: Build package
         if: steps.should-publish.outputs.should-publish == 'true'
