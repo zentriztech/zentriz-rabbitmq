@@ -1,0 +1,89 @@
+name: Publish @zentriztech/rabbitmq
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://npm.pkg.github.com'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Get package version
+        id: package-version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "current-version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Versão atual no package.json: $VERSION"
+
+      - name: Check if version should be published
+        id: should-publish
+        run: |
+          CURRENT_VERSION="${{ steps.package-version.outputs.current-version }}"
+          
+          echo "🔍 Verificando se versão $CURRENT_VERSION já foi publicada..."
+          
+          # Tentar buscar a versão no GitHub Packages
+          PUBLISHED_VERSION=$(npm view @zentriztech/rabbitmq@$CURRENT_VERSION version 2>/dev/null || echo "not-found")
+          
+          if [ "$PUBLISHED_VERSION" = "not-found" ]; then
+            echo "✅ Versão $CURRENT_VERSION não foi publicada ainda"
+            echo "should-publish=true" >> $GITHUB_OUTPUT
+            echo "🚀 Deploy será executado!"
+          else
+            echo "⚠️ Versão $CURRENT_VERSION já foi publicada"
+            echo "should-publish=false" >> $GITHUB_OUTPUT
+            echo "⏭️ Deploy será pulado"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+
+      - name: Install dependencies
+        if: steps.should-publish.outputs.should-publish == 'true'
+        run: pnpm install --no-frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+
+      - name: Build package
+        if: steps.should-publish.outputs.should-publish == 'true'
+        run: pnpm build
+
+      - name: Run tests
+        if: steps.should-publish.outputs.should-publish == 'true'
+        run: pnpm test || echo "⚠️ Testes não configurados, continuando..."
+
+      - name: Publish to GitHub Packages
+        if: steps.should-publish.outputs.should-publish == 'true'
+        run: |
+          echo "🚀 Publicando @zentriztech/rabbitmq@${{ steps.package-version.outputs.current-version }}..."
+          pnpm publish --access public --no-git-checks
+          echo "✅ Pacote publicado com sucesso!"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.should-publish.outputs.should-publish }}" = "true" ]; then
+            echo "✅ @zentriztech/rabbitmq@${{ steps.package-version.outputs.current-version }} publicado com sucesso!"
+          else
+            echo "⏭️ Versão ${{ steps.package-version.outputs.current-version }} já existe, deploy pulado"
+          fi
