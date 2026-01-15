@@ -1,0 +1,221 @@
+version: 0.2
+
+env:
+  variables:
+    NODE_VERSION: "20"
+    PACKAGE_NAME: "rabbitmq"
+    LAYER_NAME: "zentriz-rabbitmq-layer"
+    AWS_DEFAULT_REGION: "us-east-1"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - echo "🚀 Iniciando build do @zentriztech/rabbitmq"
+      - echo "Node:" && node --version
+      - echo "NPM:" && npm --version
+
+      # pnpm
+      - npm install -g pnpm@latest
+      - echo "PNPM:" && pnpm --version
+
+      # jq + zip (garante via apt, se faltar)
+      - jq --version >/dev/null 2>&1 || (apt-get update && apt-get install -y jq)
+      - zip -v >/dev/null 2>&1 || (echo "zip não encontrado; instalando..." && (apt-get update && apt-get install -y zip) || true)
+
+      # AWS CLI + identidade
+      - aws --version || { echo "❌ AWS CLI ausente"; exit 1; }
+      - aws sts get-caller-identity || { echo "❌ Falha ao obter identidade AWS (credenciais?)"; exit 1; }
+      - export AWS_PAGER=""
+
+  pre_build:
+    commands:
+      - echo "📦 Instalando dependências..."
+      - pnpm install --no-frozen-lockfile || { echo "❌ Falha ao instalar deps"; exit 1; }
+
+      - echo "🧹 Limpando build anterior..."
+      - pnpm run clean || true
+
+  build:
+    commands:
+      - |
+        set -euo pipefail
+
+        echo "🔨 Compilando TypeScript..."
+        pnpm run build
+
+        echo "🧪 Validando build..."
+        test -d dist || { echo "❌ Pasta dist não encontrada"; exit 1; }
+        [ -s package.json ] || { echo "❌ package.json vazio/ausente"; exit 1; }
+
+        echo "📋 Lendo metadados do package.json (repo)..."
+        PKG_NAME=$(jq -r '.name' package.json)
+        CURRENT_VERSION=$(jq -r '.version' package.json)
+        [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-.+)?$ ]] || {
+          echo "❌ Versão inválida: $CURRENT_VERSION (esperado semver)"; exit 1;
+        }
+        echo "Pacote: $PKG_NAME; Versão (repo): $CURRENT_VERSION"
+
+        echo "=== INÍCIO DA VERIFICAÇÃO DE VERSÃO (comparar package.json da layer x repo) ==="
+        LAST_LAYER_VERSION=$(aws lambda list-layer-versions \
+          --layer-name "$LAYER_NAME" \
+          --region "$AWS_DEFAULT_REGION" \
+          --max-items 1 \
+          --query 'LayerVersions[0].Version' \
+          --output text 2>/dev/null || echo "None")
+
+        echo "Última versão da layer: $LAST_LAYER_VERSION"
+
+        CREATE_LAYER=false
+        if [ "$LAST_LAYER_VERSION" = "None" ] || [ "$LAST_LAYER_VERSION" = "null" ] || [ -z "$LAST_LAYER_VERSION" ]; then
+          echo "🆕 Nenhuma versão da layer encontrada. Precisamos criar."
+          CREATE_LAYER=true
+        else
+          DOWNLOAD_URL=$(
+            aws lambda get-layer-version \
+              --layer-name "$LAYER_NAME" \
+              --version-number "$LAST_LAYER_VERSION" \
+              --region "$AWS_DEFAULT_REGION" \
+              --query 'Content.Location' \
+              --output text 2>&1 || true
+          )
+
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "None" ] || [[ "$DOWNLOAD_URL" == *"AccessDenied"* ]] || [[ "$DOWNLOAD_URL" == *"error"* ]]; then
+            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            LAYER_ARN="arn:aws:lambda:${AWS_DEFAULT_REGION}:${ACCOUNT_ID}:layer:${LAYER_NAME}:${LAST_LAYER_VERSION}"
+            echo "Tentando fallback por ARN: $LAYER_ARN"
+            DOWNLOAD_URL=$(
+              aws lambda get-layer-version-by-arn \
+                --arn "$LAYER_ARN" \
+                --region "$AWS_DEFAULT_REGION" \
+                --query 'Content.Location' \
+                --output text 2>&1 || true
+            )
+          fi
+
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "None" ] || [[ "$DOWNLOAD_URL" == *"AccessDenied"* ]] || [[ "$DOWNLOAD_URL" == *"error"* ]]; then
+            echo "⚠️ Não foi possível obter a URL do conteúdo da layer (sem permissão/erro)."
+            echo "🔒 Padrão seguro aplicado: NÃO publicar nova versão. (CREATE_LAYER=false)"
+            CREATE_LAYER=false
+          else
+            echo "⬇️ Baixando conteúdo da layer para ler package.json interno..."
+            wget -q "$DOWNLOAD_URL" -O current-layer.zip || {
+              echo "⚠️ Falha no download da layer. Padrão seguro: NÃO publicar."; CREATE_LAYER=false;
+            }
+
+            if [ -f current-layer.zip ]; then
+              mkdir -p current-layer-temp
+              set +e
+              unzip -q current-layer.zip -d current-layer-temp
+              UNZIP_STATUS=$?
+              set -e
+              if [ $UNZIP_STATUS -ne 0 ]; then
+                echo "⚠️ Aviso ao extrair layer (status $UNZIP_STATUS)."
+              fi
+
+              LAYER_PKG_JSON="current-layer-temp/nodejs/node_modules/@zentriztech/rabbitmq/package.json"
+              if [ -s "$LAYER_PKG_JSON" ]; then
+                LAYER_PACKAGE_VERSION=$(jq -r '.version' "$LAYER_PKG_JSON" 2>/dev/null || echo "")
+                echo "Versão (layer): ${LAYER_PACKAGE_VERSION:-<não encontrada>}"
+
+                if [ -n "$LAYER_PACKAGE_VERSION" ] && [ "$LAYER_PACKAGE_VERSION" = "$CURRENT_VERSION" ]; then
+                  echo "✅ Versões IGUAIS. NÃO publicar. (CREATE_LAYER=false)"
+                  CREATE_LAYER=false
+                else
+                  echo "🔄 Versões DIFERENTES (layer: ${LAYER_PACKAGE_VERSION:-n/d} vs repo: $CURRENT_VERSION). Publicar."
+                  CREATE_LAYER=true
+                fi
+              else
+                echo "⚠️ package.json interno não encontrado na layer. Padrão seguro: NÃO publicar."
+                CREATE_LAYER=false
+              fi
+
+              rm -rf current-layer.zip current-layer-temp
+            fi
+          fi
+        fi
+
+        : "${BASH_ENV:=/tmp/codebuild.bash_env}"
+        touch "$BASH_ENV" || { echo "❌ Não consegui criar $BASH_ENV"; exit 1; }
+        echo "export CREATE_LAYER=${CREATE_LAYER:-false}" >> "$BASH_ENV"
+        echo "=== FIM DA VERIFICAÇÃO — CREATE_LAYER=${CREATE_LAYER:-false} ==="
+
+      # Empacotar/publicar SÓ se CREATE_LAYER=true
+      - |
+        set -euo pipefail
+        if [ "${CREATE_LAYER:-false}" = "false" ]; then
+          echo "🟢 Skip confirmado: versões iguais ou sem possibilidade de validar com segurança. Não publicaremos."
+        else
+          echo "🚀 Empacotando Lambda Layer..."
+          mkdir -p nodejs
+          pushd nodejs >/dev/null
+
+          echo '{"name":"zentriz-rabbitmq-layer","version":"1.0.0","dependencies":{}}' > package.json
+          jq --argjson deps "$(jq -c '.dependencies // {}' ../package.json)" '.dependencies = $deps' package.json > package.json.tmp && mv package.json.tmp package.json
+
+          echo "📦 Instalando dependências de produção..."
+          npm install --production --no-package-lock || { echo "❌ Falha no npm install da layer"; exit 1; }
+
+          rm -f package.json
+          popd >/dev/null
+
+          mkdir -p nodejs/node_modules/@zentriztech/rabbitmq
+          cp -r dist/* nodejs/node_modules/@zentriztech/rabbitmq/
+          cp package.json nodejs/node_modules/@zentriztech/rabbitmq/
+
+          # Incluir dependências @zentriztech/* (core)
+          if [ -d "../core/dist" ]; then
+            echo "📦 Incluindo dependência @zentriztech/core..."
+            mkdir -p nodejs/node_modules/@zentriztech/core
+            cp -r ../core/dist/* nodejs/node_modules/@zentriztech/core/
+            cp ../core/package.json nodejs/node_modules/@zentriztech/core/
+          fi
+
+          echo "📦 Criando ZIP da layer..."
+          zip -qr zentriz-rabbitmq-layer.zip nodejs
+          test -s zentriz-rabbitmq-layer.zip || { echo "❌ ZIP não gerado"; exit 1; }
+          ls -lh zentriz-rabbitmq-layer.zip
+
+          echo "📤 Publicando Lambda Layer (com retries)..."
+          ATTEMPTS=0
+          until [ $ATTEMPTS -ge 3 ]
+          do
+            set +e
+            aws lambda publish-layer-version \
+              --layer-name "${LAYER_NAME}" \
+              --description "Zentriz RabbitMQ Package v$(jq -r '.version' package.json) — built $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --zip-file fileb://zentriz-rabbitmq-layer.zip \
+              --compatible-runtimes nodejs20.x \
+              --region "${AWS_DEFAULT_REGION}"
+            STATUS=$?
+            set -e
+            if [ $STATUS -eq 0 ]; then
+              echo "✅ Publicação concluída."
+              break
+            fi
+            ATTEMPTS=$((ATTEMPTS+1))
+            echo "⚠️ Falha ao publicar (tentativa ${ATTEMPTS}/3). Aguardando e tentando de novo..."
+            sleep $((ATTEMPTS * 5))
+          done
+
+          if [ $STATUS -ne 0 ]; then
+            echo "❌ Falha ao publicar a layer após 3 tentativas."
+          fi
+        fi
+
+  post_build:
+    commands:
+      - echo "🎉 Build finalizado."
+      - rm -f layer-flag.txt || true
+
+artifacts:
+  files:
+    - dist/**/*
+    - package.json
+  name: zentriz-rabbitmq-build-$(date +%Y-%m-%d-%H-%M-%S)
+
+cache:
+  paths:
+    - node_modules/**/*
+    - ~/.pnpm-store/**/*

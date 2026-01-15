@@ -1,0 +1,36 @@
+{
+  "name": "@zentriztech/rabbitmq",
+  "version": "0.1.0",
+  "type": "commonjs",
+  "author": "Zentriz Tech",
+  "email": "contato@zentriz.com.br",
+  "license": "MIT",
+  "description": "Zentriz RabbitMQ Package - RabbitMQ client for messaging",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zentriztech/zentriz-rabbitmq.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": {
+    "node": "20.x",
+    "pnpm": ">=10"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@zentriztech/core": "workspace:*",
+    "amqplib": "^0.10.3"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.4",
+    "@types/node": "^20.12.12",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.5.4"
+  }
+}
