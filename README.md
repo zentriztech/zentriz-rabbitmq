@@ -2,6 +2,8 @@
 
 Zentriz RabbitMQ Package - RabbitMQ client for messaging.
 
+> **Status**: Ready for production use
+
 ## Installation
 
 ```bash
