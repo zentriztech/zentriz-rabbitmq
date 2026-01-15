@@ -3,6 +3,9 @@ name: Publish @zentriztech/rabbitmq
 on:
   push:
     branches: [main]
+    tags:
+      - '*-deploy'
+      - 'deploy*'
   workflow_dispatch:
 
 jobs:

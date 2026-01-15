@@ -124,6 +124,11 @@ npm run build
 npm run clean
 ```
 
+## Links
+
+- [GitHub Repository](https://github.com/zentriztech/zentriz-rabbitmq)
+- [GitHub Packages](https://github.com/orgs/zentriztech/packages/npm/package/rabbitmq)
+
 ## License
 
 MIT
