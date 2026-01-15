@@ -28,6 +28,15 @@ jobs:
         with:
           version: 10
 
+      - name: Configure pnpm for GitHub Packages
+        run: |
+          echo "🔧 Configurando pnpm para GitHub Packages..."
+          pnpm config set @zentriztech:registry https://npm.pkg.github.com
+          pnpm config set //npm.pkg.github.com/:_authToken ${{ secrets.DEPLOY_TOKEN }}
+          echo "✅ Configuração do pnpm concluída"
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+
       - name: Get package version
         id: package-version
         run: |
@@ -59,9 +68,12 @@ jobs:
 
       - name: Install dependencies
         if: steps.should-publish.outputs.should-publish == 'true'
-        run: pnpm install --no-frozen-lockfile
+        run: |
+          echo "📦 Instalando dependências..."
+          pnpm install --no-frozen-lockfile
         env:
           NODE_AUTH_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          PNPM_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
 
       - name: Build package
         if: steps.should-publish.outputs.should-publish == 'true'
